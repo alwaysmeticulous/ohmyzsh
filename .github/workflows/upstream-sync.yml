@@ -1,0 +1,67 @@
+name: Sync upstream
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read # pushes use the UPSTREAM_SYNC_DEPLOY_KEY deploy key, not GITHUB_TOKEN
+
+env:
+  UPSTREAM_URL: https://github.com/ohmyzsh/ohmyzsh.git
+  UPSTREAM_BRANCH: master
+  MIN_AGE: 7 days ago
+
+jobs:
+  sync:
+    name: Merge upstream commits older than 7 days
+    runs-on: ubuntu-latest
+    if: github.repository != 'ohmyzsh/ohmyzsh'
+    steps:
+      - name: Check for deploy key
+        env:
+          UPSTREAM_SYNC_DEPLOY_KEY: ${{ secrets.UPSTREAM_SYNC_DEPLOY_KEY }}
+        run: |
+          if [ -z "$UPSTREAM_SYNC_DEPLOY_KEY" ]; then
+            echo "::error::UPSTREAM_SYNC_DEPLOY_KEY secret is not set"
+            exit 1
+          fi
+
+      - name: Set up git repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          fetch-depth: 0
+          # A write-enabled deploy key is required because GITHUB_TOKEN can't
+          # push commits that modify files under .github/workflows, which
+          # upstream does regularly
+          ssh-key: ${{ secrets.UPSTREAM_SYNC_DEPLOY_KEY }}
+
+      - name: Merge upstream
+        run: |
+          git fetch --no-tags "$UPSTREAM_URL" "$UPSTREAM_BRANCH"
+
+          # Newest commit on upstream's mainline committed before the cutoff
+          target=$(git rev-list -1 --first-parent --before="$MIN_AGE" FETCH_HEAD)
+          if [ -z "$target" ]; then
+            echo "No upstream commits older than $MIN_AGE"
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor "$target" HEAD; then
+            echo "Already up to date with upstream ${target}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Fast-forwards when master has no fork-only commits, merges otherwise
+          git merge --no-edit -m "Merge upstream ohmyzsh/ohmyzsh@${target:0:9}" "$target"
+          git push origin HEAD:master
+
+          echo "Synced master to upstream ${target}" >> "$GITHUB_STEP_SUMMARY"
